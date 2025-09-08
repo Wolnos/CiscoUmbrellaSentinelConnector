@@ -16,6 +16,9 @@ from threading import Thread
 from io import StringIO
 from .state_manager import StateManager
 from dateutil.parser import parse as parse_datetime
+from azure.core.exceptions import HttpResponseError
+from azure.identity import DefaultAzureCredential
+from azure.monitor.ingestion import LogsIngestionClient
 import azure.functions as func
 import re
 
@@ -30,6 +33,10 @@ sentinel_customer_id = os.environ.get('WorkspaceID')
 sentinel_shared_key = os.environ.get('WorkspaceKey')
 sentinel_log_type = 'Cisco_Umbrella'
 
+endpoint_uri = os.environ['DATA_COLLECTION_ENDPOINT']
+rule_id = os.environ['LOGS_DCR_RULE_ID']
+stream_name = os.environ['LOGS_DCR_STREAM_NAME']
+
 aws_s3_bucket = os.environ.get('S3Bucket')
 aws_access_key_id = os.environ.get('AWSAccessKeyId')
 aws_secret_acces_key = os.environ.get('AWSSecretAccessKey')
@@ -43,7 +50,6 @@ pattern = r'https:\/\/([\w\-]+)\.ods\.opinsights\.azure.([a-zA-Z\.]+)$'
 match = re.match(pattern,str(logAnalyticsUri))
 if(not match):
     raise Exception("Cisco_Umbrella: Invalid Log Analytics Uri.")
-
 
 def main(mytimer: func.TimerRequest) -> None:
     if mytimer.past_due:
@@ -80,18 +86,18 @@ def main(mytimer: func.TimerRequest) -> None:
 
     if DIVIDE_TO_MULTIPLE_TABLES:
         sentinel_dict = {
-        'dns': AzureSentinelConnector(logAnalyticsUri, sentinel_customer_id, sentinel_shared_key, sentinel_log_type + '_dns', queue_size=10000, bulks_number=10),
-        'proxy': AzureSentinelConnector(logAnalyticsUri, sentinel_customer_id, sentinel_shared_key, sentinel_log_type + '_proxy', queue_size=10000, bulks_number=10),
-        'ip': AzureSentinelConnector(logAnalyticsUri, sentinel_customer_id, sentinel_shared_key, sentinel_log_type + '_ip', queue_size=10000, bulks_number=10),
-        'cloudfirewall': AzureSentinelConnector(logAnalyticsUri, sentinel_customer_id, sentinel_shared_key, sentinel_log_type + '_cloudfirewall', queue_size=10000, bulks_number=10),
-        'firewall': AzureSentinelConnector(logAnalyticsUri, sentinel_customer_id, sentinel_shared_key, sentinel_log_type + '_firewall', queue_size=10000, bulks_number=10),
-        'dlp': AzureSentinelConnector(logAnalyticsUri, sentinel_customer_id, sentinel_shared_key, sentinel_log_type + '_dlp', queue_size=10000, bulks_number=10),  # Added DLP
-        'ravpn': AzureSentinelConnector(logAnalyticsUri, sentinel_customer_id, sentinel_shared_key, sentinel_log_type + '_ravpnlogs', queue_size=10000, bulks_number=10),
-        'audit': AzureSentinelConnector(logAnalyticsUri, sentinel_customer_id, sentinel_shared_key, sentinel_log_type + '_audit', queue_size=10000, bulks_number=10),
-        'ztna': AzureSentinelConnector(logAnalyticsUri, sentinel_customer_id, sentinel_shared_key, sentinel_log_type + '_ztna', queue_size=10000, bulks_number=10),
-        'intrusion': AzureSentinelConnector(logAnalyticsUri, sentinel_customer_id, sentinel_shared_key, sentinel_log_type + '_intrusion', queue_size=10000, bulks_number=10),
-        'ztaflow': AzureSentinelConnector(logAnalyticsUri, sentinel_customer_id, sentinel_shared_key, sentinel_log_type + '_ztaflow', queue_size=10000, bulks_number=10),
-        'fileevent': AzureSentinelConnector(logAnalyticsUri, sentinel_customer_id, sentinel_shared_key, sentinel_log_type + '_fileevent', queue_size=10000, bulks_number=10)
+        'dns': AzureSentinelConnector(sentinel_shared_key, sentinel_log_type + '_dns', queue_size=10000, bulks_number=10),
+        'proxy': AzureSentinelConnector(sentinel_shared_key, sentinel_log_type + '_proxy', queue_size=10000, bulks_number=10),
+        'ip': AzureSentinelConnector(sentinel_shared_key, sentinel_log_type + '_ip', queue_size=10000, bulks_number=10),
+        'cloudfirewall': AzureSentinelConnector(sentinel_shared_key, sentinel_log_type + '_cloudfirewall', queue_size=10000, bulks_number=10),
+        'firewall': AzureSentinelConnector(sentinel_shared_key, sentinel_log_type + '_firewall', queue_size=10000, bulks_number=10),
+        'dlp': AzureSentinelConnector(sentinel_shared_key, sentinel_log_type + '_dlp', queue_size=10000, bulks_number=10),  # Added DLP
+        'ravpn': AzureSentinelConnector(sentinel_shared_key, sentinel_log_type + '_ravpnlogs', queue_size=10000, bulks_number=10),
+        'audit': AzureSentinelConnector(sentinel_shared_key, sentinel_log_type + '_audit', queue_size=10000, bulks_number=10),
+        'ztna': AzureSentinelConnector(sentinel_shared_key, sentinel_log_type + '_ztna', queue_size=10000, bulks_number=10),
+        'intrusion': AzureSentinelConnector(sentinel_shared_key, sentinel_log_type + '_intrusion', queue_size=10000, bulks_number=10),
+        'ztaflow': AzureSentinelConnector(sentinel_shared_key, sentinel_log_type + '_ztaflow', queue_size=10000, bulks_number=10),
+        'fileevent': AzureSentinelConnector(sentinel_shared_key, sentinel_log_type + '_fileevent', queue_size=10000, bulks_number=10)
                         }
         last_ts = None
         for obj in sorted(obj_list, key=lambda k: k['LastModified']):
@@ -1168,10 +1174,10 @@ class UmbrellaClient:
 
 
 class AzureSentinelConnector:
-    def __init__(self, log_analytics_uri, customer_id, shared_key, log_type, queue_size=200, bulks_number=10, queue_size_bytes=25 * (2**20)):
-        self.log_analytics_uri = log_analytics_uri
-        self.customer_id = customer_id
-        self.shared_key = shared_key
+    def __init__(self, log_type, queue_size=200, bulks_number=10, queue_size_bytes=25 * (2**20)):
+        self.endpoint_uri = endpoint_uri
+        self.rule_id = rule_id
+        self.stream_name = stream_name
         self.log_type = log_type
         self.queue_size = queue_size
         self.bulks_number = bulks_number
@@ -1227,31 +1233,14 @@ class AzureSentinelConnector:
         authorization = "SharedKey {}:{}".format(customer_id, encoded_hash)
         return authorization
 
-    def _post_data(self, customer_id, shared_key, body, log_type):
-        events_number = len(body)
-        body = json.dumps(body)
-        method = 'POST'
-        content_type = 'application/json'
-        resource = '/api/logs'
-        rfc1123date = datetime.datetime.utcnow().strftime('%a, %d %b %Y %H:%M:%S GMT')
-        content_length = len(body)
-        signature = self._build_signature(customer_id, shared_key, rfc1123date, content_length, method, content_type, resource)
-        uri = self.log_analytics_uri + resource + '?api-version=2016-04-01'
+    def _post_data(self, body):
+        credential = DefaultAzureCredential()
+        client = LogsIngestionClient(endpoint=self.endpoint_uri, credential=credential, logging_enable=True)
 
-        headers = {
-            'content-type': content_type,
-            'Authorization': signature,
-            'Log-Type': log_type,
-            'x-ms-date': rfc1123date
-        }
-
-        response = requests.post(uri, data=body, headers=headers)
-        if (response.status_code >= 200 and response.status_code <= 299):
-            logging.info('{} events have been successfully sent to Microsoft Sentinel'.format(events_number))
-            self.successfull_sent_events_number += events_number
-        else:
-            logging.error("Error during sending events to Microsoft Sentinel. Response code: {}".format(response.status_code))
-            self.failed_sent_events_number += events_number
+        try:
+            client.upload(rule_id=self.dcr_immutableid, stream_name=stream_name, logs=body)
+        except HttpResponseError as e:
+            logging.info(f"Upload failed: {e}")
 
     def _check_size(self, queue):
         data_bytes_len = len(json.dumps(queue).encode())
